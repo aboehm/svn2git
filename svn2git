@@ -1,0 +1,134 @@
+#!/bin/sh
+
+# Subverstion to Git patch-replay converter via patch replay
+# Copyright (C) 2016 Alexander Böhm <alxndr.boehm@gmail.com>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+TOP=`pwd`
+TMP_SVN=`mktemp -d -u /tmp/svn.tmp.XXXXXX`
+CONV_SVN="$1"
+CONV_GIT="$2"
+SVN_START="1"
+SVN_END="HEAD"
+PROG=`realpath $0 |sed 's/^.*\///'`
+
+svn_revisions() {
+	svn log -r $SVN_START:$SVN_END $TMP_SVN |egrep ^r[0-9]+ |awk '{ print $1 }' |sed 's/^r//' |sort -n
+}
+
+svn_revision_author() {
+	REV=$1
+	svn log -r $REV $TMP_SVN |tail -n +2 |head -n1 |awk -F '|' '{print $2}'
+}
+
+svn_revision_date() {
+	REV=$1
+	svn log -r $REV $TMP_SVN |tail -n +2 \
+		|head -n1 \
+		|awk -F '|' '{print $3}' \
+		|sed 's/\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\) \([0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\) \(+\|-\)\([0-9]\{4\}\) (\([A-Za-z]\+, [0-9]\{2\} [A-Za-z]\+ [0-9]\{4\}\))/\5 \2 \3\4/'
+}
+
+svn_revision_comment() {
+	REV=$1
+	svn log -r $REV $TMP_SVN |tail -n +3 |head -n -1
+}
+
+svn_udiff() {
+	FROM_REV=$1
+	TO_REV=$2
+	svn diff -r $FROM_REV:$TO_REV $TMP_SVN
+}
+
+count_svn_dir_depth() {
+	echo $TMP_SVN |sed 's/\//\n/g' |wc -l
+}
+
+print_help() {
+	echo "Converts a Subversion repository into a local Git working copy via patch replay"
+	echo "syntax: $PROG SVN GIT [SVN-START SVN-END]"
+	echo ""
+	echo "        SVN         URL describes Subversion repository"
+	echo "        GIT         Path to directory, that hold's the new Git"
+	echo "                    working copy"
+	echo "        SVN-START   Subversion Revision to start"
+	echo "        SVN-END     Subversion Revision to end"
+	echo ""
+	echo "$PROG, Copyright (C) 2016 Alexander Böhm <alxndr.boehm@gmail.com>"
+	echo "Licensed under GPLv2. See source distribution for detailed"
+	echo "copyright notices."
+	echo ""
+}
+
+if [ $# -ne 2 ] && [ $# -ne 4 ] ; then
+	print_help
+	exit 0
+else
+	if [ $# -eq 4 ] ; then
+		SVN_START="$3"
+		SVN_END="$4"
+	fi
+	echo "Converting Subversion repository into Git working copy"
+	echo "Remote Subversion repository : $CONV_SVN ($SVN_START:$SVN_END)"
+	echo "Local Git repository         : $CONV_GIT"
+fi
+
+if [ -d $CONV_GIT ] ; then
+	echo "Directory for Git repository already exists. To delete, type YES? "
+	read DELETE
+	if [ "$DELETE" = "YES" ] ; then
+		rm -rf $CONV_GIT
+	else
+		echo Aborting.
+		exit 0
+	fi
+fi
+
+echo Initalize Git-Repo
+
+mkdir -p $CONV_GIT
+cd $CONV_GIT
+git init .
+
+echo Cloning SVN-Repo
+svn checkout $CONV_SVN $TMP_SVN
+
+echo Migrating SVN-Patches into Git-Repo
+PATCH_STRIP_DIR=`count_svn_dir_depth`
+FROM_REV=0
+for REV in `svn_revisions` ; do
+	[ "$VERBOSE" ] && printf "Working on Revision $REV\r"
+	TO_REV=$REV
+	COMMENT=`svn_revision_comment $REV`
+	AUTHOR=`svn_revision_author $REV`
+	DATE=`svn_revision_date $REV`
+
+	svn_udiff $FROM_REV $TO_REV |patch -d $CONV_GIT -p$PATCH_STRIP_DIR -Nf >/dev/null
+	git add .
+	git commit --date="$DATE" --author="$AUTHOR <noreply@localhost>" -m "$COMMENT
+
+[SVN $FROM_REV -> $TO_REV]" . >/dev/null
+	#svn_revision_comment $REV |git commit --git-dir=$CONV_GIT .
+
+	FROM_REV=$REV
+done
+
+echo ""
+echo "Deleting working copy."
+rm -rf $TMP_SVN
+
+echo "Done."
+
